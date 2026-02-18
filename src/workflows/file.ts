@@ -1,9 +1,13 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 import { parse as parseYaml } from 'yaml';
 
 import { randomUUID } from 'node:crypto';
 
+import { createDefaultRegistry } from '../commands/registry.js';
+import { parsePipeline } from '../parser.js';
+import { runPipeline } from '../runtime.js';
 import { encodeToken } from '../token.js';
 import { readStateJson, writeStateJson } from '../state/store.js';
 
@@ -165,6 +169,7 @@ export async function runWorkflowFile({
   }
 
   let lastStepId: string | null = null;
+  const registry = createDefaultRegistry();
 
   for (let idx = startIndex; idx < steps.length; idx++) {
     const step = steps[idx];
@@ -179,7 +184,14 @@ export async function runWorkflowFile({
     const env = mergeEnv(ctx.env, workflow.env, step.env, resolvedArgs, results);
     const cwd = resolveCwd(step.cwd ?? workflow.cwd, resolvedArgs);
 
-    const { stdout } = await runShellCommand({ command, stdin: stdinValue, env, cwd });
+    const { stdout } = await runWorkflowCommand({
+      command,
+      stdin: stdinValue,
+      env,
+      cwd,
+      ctx,
+      registry,
+    });
     const json = parseJson(stdout);
 
     results[step.id] = { id: step.id, stdout, json };
@@ -504,4 +516,127 @@ async function runShellCommand({
       reject(new Error(`workflow command failed (${code}): ${stderr.trim() || stdout.trim() || command}`));
     });
   });
+}
+
+async function runWorkflowCommand({
+  command,
+  stdin,
+  env,
+  cwd,
+  ctx,
+  registry,
+}: {
+  command: string;
+  stdin: string | null;
+  env: Record<string, string | undefined>;
+  cwd?: string;
+  ctx: RunContext;
+  registry: ReturnType<typeof createDefaultRegistry>;
+}) {
+  const parsed = tryParseInternalPipeline(command, registry);
+  if (!parsed) {
+    return runShellCommand({ command, stdin, env, cwd });
+  }
+
+  return runInternalPipelineCommand({
+    command,
+    pipeline: parsed,
+    stdin,
+    env,
+    cwd,
+    ctx,
+    registry,
+  });
+}
+
+function tryParseInternalPipeline(command: string, registry: ReturnType<typeof createDefaultRegistry>) {
+  let pipeline;
+  try {
+    pipeline = parsePipeline(command);
+  } catch {
+    return null;
+  }
+
+  for (const stage of pipeline) {
+    if (!registry.get(stage.name)) return null;
+  }
+
+  return pipeline;
+}
+
+async function runInternalPipelineCommand({
+  command,
+  pipeline,
+  stdin,
+  env,
+  cwd,
+  ctx,
+  registry,
+}: {
+  command: string;
+  pipeline: ReturnType<typeof parsePipeline>;
+  stdin: string | null;
+  env: Record<string, string | undefined>;
+  cwd?: string;
+  ctx: RunContext;
+  registry: ReturnType<typeof createDefaultRegistry>;
+}) {
+  const outChunks: string[] = [];
+  const errChunks: string[] = [];
+  const stdoutCapture = captureWritable(outChunks);
+  const stderrCapture = captureWritable(errChunks);
+  const input = toPipelineInput(stdin);
+
+  const originalCwd = process.cwd();
+  if (cwd) process.chdir(cwd);
+
+  try {
+    const output = await runPipeline({
+      pipeline,
+      registry,
+      stdin: ctx.stdin,
+      stdout: stdoutCapture,
+      stderr: stderrCapture,
+      env,
+      mode: ctx.mode,
+      input,
+    });
+
+    if (output.halted) {
+      throw new Error(`workflow command halted at ${output.haltedAt?.stage?.name ?? 'unknown stage'}`);
+    }
+
+    const renderedStdout = outChunks.join('');
+    const unrenderedStdout = output.items.length ? `${JSON.stringify(output.items, null, 2)}\n` : '';
+
+    return {
+      stdout: output.rendered ? renderedStdout : unrenderedStdout,
+      stderr: errChunks.join(''),
+    };
+  } catch (err: any) {
+    throw new Error(`workflow command failed (lobster): ${err?.message ?? String(err)}${errChunks.length ? `\n${errChunks.join('')}` : ''}`);
+  } finally {
+    if (cwd) process.chdir(originalCwd);
+  }
+}
+
+function captureWritable(chunks: string[]) {
+  return new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+      callback();
+    },
+  });
+}
+
+function toPipelineInput(stdin: string | null) {
+  if (stdin === null) return [];
+  const trimmed = stdin.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [stdin];
+  }
 }

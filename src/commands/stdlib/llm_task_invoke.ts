@@ -305,6 +305,14 @@ export const llmTaskInvokeCommand = {
       }
 
       if (!validateResponseEnvelope(responseEnvelope)) {
+        console.log(
+          '[llm_task.invoke] invalid response envelope from /tools/invoke:',
+          JSON.stringify(responseEnvelope, null, 2),
+        );
+        console.log(
+          '[llm_task.invoke] envelope validation errors:',
+          ajv.errorsText(validateResponseEnvelope.errors),
+        );
         throw new Error(`llm_task.invoke received invalid response envelope`);
       }
 

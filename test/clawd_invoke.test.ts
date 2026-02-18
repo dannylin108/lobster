@@ -126,3 +126,102 @@ test('clawd.invoke --each maps input items into tool args', async () => {
     server.close();
   }
 });
+
+test('openclaw.invoke is an alias for clawd.invoke', async () => {
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/tools/invoke') {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, result: { alias: true } }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const addr = server.address();
+  const port = typeof addr === "string" || addr == null ? 0 : addr.port;
+
+  try {
+    const registry = createDefaultRegistry();
+    const cmd = registry.get('openclaw.invoke');
+    assert.ok(cmd, 'openclaw.invoke should be registered');
+
+    const result = await cmd.run({
+      input: streamOf([]),
+      args: {
+        _: [],
+        url: `http://127.0.0.1:${port}`,
+        tool: 'demo',
+        action: 'ping',
+      },
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env: process.env,
+        registry,
+        mode: 'tool',
+        render: { json() {}, lines() {} },
+      },
+    });
+
+    const items = [];
+    for await (const it of result.output) items.push(it);
+    assert.deepEqual(items, [{ alias: true }]);
+  } finally {
+    server.close();
+  }
+});
+
+test('openclaw.invoke accepts OPENCLAW_GATEWAY_URL ws:// env and OPENCLAW_GATEWAY_TOKEN', async () => {
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/tools/invoke') {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+
+    assert.equal(req.headers.authorization, 'Bearer env-token');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, result: { via: 'openclaw-env' } }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const addr = server.address();
+  const port = typeof addr === "string" || addr == null ? 0 : addr.port;
+
+  try {
+    const registry = createDefaultRegistry();
+    const cmd = registry.get('openclaw.invoke');
+    assert.ok(cmd, 'openclaw.invoke should be registered');
+
+    const result = await cmd.run({
+      input: streamOf([]),
+      args: {
+        _: [],
+        tool: 'demo',
+        action: 'ping',
+      },
+      ctx: {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env: {
+          ...process.env,
+          OPENCLAW_GATEWAY_URL: `ws://127.0.0.1:${port}`,
+          OPENCLAW_GATEWAY_TOKEN: 'env-token',
+        },
+        registry,
+        mode: 'tool',
+        render: { json() {}, lines() {} },
+      },
+    });
+
+    const items = [];
+    for await (const it of result.output) items.push(it);
+    assert.deepEqual(items, [{ via: 'openclaw-env' }]);
+  } finally {
+    server.close();
+  }
+});

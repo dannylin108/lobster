@@ -1,5 +1,6 @@
-export const clawdInvokeCommand = {
-  name: 'clawd.invoke',
+function createInvokeCommand(name: 'clawd.invoke' | 'openclaw.invoke') {
+  return {
+  name,
   meta: {
     description: 'Call a local Clawdbot tool endpoint',
     argsSchema: {
@@ -21,11 +22,11 @@ export const clawdInvokeCommand = {
     sideEffects: ['calls_clawd_tool'],
   },
   help() {
-    return `clawd.invoke — call a local Clawdbot tool endpoint\n\n` +
+    return `${name} — call a local Clawdbot tool endpoint\n\n` +
       `Usage:\n` +
-      `  clawd.invoke --tool message --action send --args-json '{"provider":"telegram","to":"...","message":"..."}'\n` +
-      `  clawd.invoke --tool message --action send --args-json '{...}' --dry-run\n` +
-      `  ... | clawd.invoke --tool message --action send --each --item-key message --args-json '{"provider":"telegram","to":"..."}'\n\n` +
+      `  ${name} --tool message --action send --args-json '{"provider":"telegram","to":"...","message":"..."}'\n` +
+      `  ${name} --tool message --action send --args-json '{...}' --dry-run\n` +
+      `  ... | ${name} --tool message --action send --each --item-key message --args-json '{"provider":"telegram","to":"..."}'\n\n` +
       `Config:\n` +
       `  - Uses CLAWD_URL env var by default (or pass --url).\n` +
       `  - Optional Bearer token via CLAWD_TOKEN env var (or pass --token).\n` +
@@ -37,14 +38,14 @@ export const clawdInvokeCommand = {
     const each = Boolean(args.each);
     const itemKey = String(args.itemKey ?? args['item-key'] ?? 'item');
 
-    const url = String(args.url ?? ctx.env.CLAWD_URL ?? '').trim();
-    if (!url) throw new Error('clawd.invoke requires --url or CLAWD_URL');
+    const url = resolveGatewayUrl(args, ctx.env);
+    if (!url) throw new Error('clawd.invoke requires --url or gateway env (CLAWD_URL / OPENCLAW_GATEWAY_URL)');
 
     const tool = args.tool;
     const action = args.action;
     if (!tool || !action) throw new Error('clawd.invoke requires --tool and --action');
 
-    const token = String(args.token ?? ctx.env.CLAWD_TOKEN ?? '').trim();
+    const token = resolveGatewayToken(args, ctx.env);
 
     let toolArgs = {};
     if (args['args-json']) {
@@ -125,7 +126,39 @@ export const clawdInvokeCommand = {
     };
   },
 };
+}
+
+export const clawdInvokeCommand = createInvokeCommand('clawd.invoke');
+export const openclawInvokeCommand = createInvokeCommand('openclaw.invoke');
 
 async function* asStream(items) {
   for (const item of items) yield item;
+}
+
+function resolveGatewayUrl(args: any, env: Record<string, string | undefined>) {
+  const raw = String(
+    args.url
+      ?? env.CLAWD_URL
+      ?? env.OPENCLAW_GATEWAY_HTTP_URL
+      ?? env.OPENCLAW_GATEWAY_URL
+      ?? env.GATEWAY_URL
+      ?? '',
+  ).trim();
+
+  if (!raw) return '';
+
+  // OpenClaw gateway URLs are often configured as ws://... for websocket clients.
+  if (raw.startsWith('ws://')) return `http://${raw.slice('ws://'.length)}`;
+  if (raw.startsWith('wss://')) return `https://${raw.slice('wss://'.length)}`;
+  return raw;
+}
+
+function resolveGatewayToken(args: any, env: Record<string, string | undefined>) {
+  return String(
+    args.token
+      ?? env.CLAWD_TOKEN
+      ?? env.OPENCLAW_GATEWAY_TOKEN
+      ?? env.OPENCLAW_GATEWAY_PASSWORD
+      ?? '',
+  ).trim();
 }
